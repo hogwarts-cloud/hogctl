@@ -7,7 +7,7 @@ permissions:
   packages: write
 
 jobs:
-  release-linux-amd64:
+  release:
     name: release linux/amd64
     runs-on: ubuntu-latest
     steps:
@@ -18,6 +18,6 @@ jobs:
         goversion: 1.22.2 
         goos: linux
         goarch: amd64
-        asset_name: hogctl
+        asset_name: "${BINARY_NAME}"
         compress_assets: false
         md5sum: false
