@@ -15,6 +15,7 @@ jobs:
     - uses: wangyoucao577/go-release-action@v1
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
+        goversion: 1.22.2 
         goos: linux
         goarch: amd64
         asset_name: hogctl
