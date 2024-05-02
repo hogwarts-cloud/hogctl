@@ -17,6 +17,6 @@ jobs:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goos: linux
         goarch: amd64
-        asset_name: ${BINARY_NAME}
+        asset_name: hogctl
         compress_assets: false
         md5sum: false
