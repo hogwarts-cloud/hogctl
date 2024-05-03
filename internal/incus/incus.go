@@ -50,9 +50,10 @@ func (c *Client) LaunchInstance(ctx context.Context, instance *models.Instance) 
 			Config: map[string]string{
 				"limits.cpu": instance.Resources.Flavor.CPU(),
 				// "limits.memory":             instance.Flavor.Memory(), // wtf
+				"cloud-init.network-config": fmt.Sprintf(NetworkConfig, "10.10.10.100"),
+				"snapshots.schedule":        "*/5 * * * *",
 				"cloud-init.user-data":      fmt.Sprintf(UserData, instance.User.Name, instance.User.PublicKey),
 				"user.email":                instance.User.Email,
-				"cloud-init.network-config": fmt.Sprintf(NetworkConfig, "10.10.10.100"),
 			},
 			Devices: map[string]map[string]string{
 				"eth0": {"type": "nic", "name": "eth0", "network": "incusbr0"},
