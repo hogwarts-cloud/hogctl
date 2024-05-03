@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/danilkaz/hogwarts-cloud/hogctl/internal/deployer"
 	"github.com/danilkaz/hogwarts-cloud/hogctl/internal/incus"
@@ -24,6 +23,8 @@ var validate = &cobra.Command{
 	Use:   "validate",
 	Short: "Validate the configuration from directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
 		instances, err := parser.Parse(path)
 		if err != nil {
 			return fmt.Errorf("failed to parse instances: %w", err)
@@ -41,6 +42,8 @@ var deploy = &cobra.Command{
 	Use:   "deploy",
 	Short: "Deploy the configuration from directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
 		instances, err := parser.Parse(path)
 		if err != nil {
 			return fmt.Errorf("failed to parse instances: %w", err)
@@ -68,7 +71,5 @@ func init() {
 }
 
 func main() {
-	if err := root.Execute(); err != nil {
-		log.Fatal(err)
-	}
+	root.Execute()
 }

@@ -3,6 +3,7 @@ package incus
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/danilkaz/hogwarts-cloud/hogctl/internal/models"
 	client "github.com/lxc/incus/client"
@@ -11,11 +12,18 @@ import (
 )
 
 var (
-	NetworkConfiguration = `version: 2
+	UserData = `#cloud-config
+users:
+- name: %s
+  sudo: ALL=(ALL) NOPASSWD:ALL
+  shell: /bin/bash
+  ssh_authorized_keys:
+  - %s`
+	NetworkConfig = `version: 2
 ethernets:
   eth0:
     addresses:
-    - 10.10.10.100/24
+    - %s/24
     gateway4: 10.10.10.1
     nameservers:
       addresses:
@@ -41,9 +49,15 @@ func (c *Client) LaunchInstance(ctx context.Context, instance *models.Instance) 
 	op, err := c.client.CreateInstance(api.InstancesPost{
 		InstancePut: api.InstancePut{
 			Config: map[string]string{
-				"limits.cpu": instance.Flavor.CPU(),
+				"limits.cpu": instance.Resources.Flavor.CPU(),
 				// "limits.memory":             instance.Flavor.Memory(), // wtf
-				"cloud-init.network-config": NetworkConfiguration,
+				"cloud-init.user-data":      fmt.Sprintf(UserData, instance.User.Name, instance.User.PublicKey),
+				"user.email":                instance.User.Email,
+				"cloud-init.network-config": fmt.Sprintf(NetworkConfig, "10.10.10.100"),
+			},
+			Devices: map[string]map[string]string{
+				"eth0": {"type": "nic", "name": "eth0", "network": "incusbr0"},
+				"root": {"type": "disk", "path": "/", "pool": "incuslvm", "size": fmt.Sprintf("%dGB", instance.Resources.Disk)},
 			},
 		},
 		Name:   instance.Name,
@@ -76,22 +90,24 @@ func (c *Client) DeleteInstance(ctx context.Context, instanceName string) error 
 }
 
 func New() (*Client, error) {
-	// clientCert, err := os.ReadFile("client.crt")
-	// if err != nil {
-	// 	return nil, fmt.Errorf("failed to read client certificate: %w", err)
-	// }
+	clientCert, err := os.ReadFile("client.crt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read client certificate: %w", err)
+	}
 
-	// clientKey, err := os.ReadFile("client.key")
-	// if err != nil {
-	// 	return nil, fmt.Errorf("failed to read client key: %w", err)
-	// }
+	clientKey, err := os.ReadFile("client.key")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read client key: %w", err)
+	}
 
-	// client, err := client.ConnectIncus(fmt.Sprintf("https://%s:8443", ip), &client.ConnectionArgs{
-	// 	TLSClientCert:      string(clientCert),
-	// 	TLSClientKey:       string(clientKey),
-	// 	InsecureSkipVerify: true,
-	// })
-	client, err := client.ConnectIncusUnix("", nil)
+	ip := "62.84.113.137"
+
+	client, err := client.ConnectIncus(fmt.Sprintf("https://%s:8443", ip), &client.ConnectionArgs{
+		TLSClientCert:      string(clientCert),
+		TLSClientKey:       string(clientKey),
+		InsecureSkipVerify: true,
+	})
+	// client, err := client.ConnectIncusUnix("", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Incus: %w", err)
 	}

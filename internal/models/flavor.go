@@ -2,7 +2,7 @@ package models
 
 type Flavor string
 
-var AvailableFlavors []string = []string{"micro"}
+var AvailableFlavors []Flavor = []Flavor{"micro"}
 
 func (f Flavor) CPU() string {
 	switch f {
