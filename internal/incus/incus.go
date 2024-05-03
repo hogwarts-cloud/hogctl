@@ -3,7 +3,6 @@ package incus
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/danilkaz/hogwarts-cloud/hogctl/internal/models"
 	client "github.com/lxc/incus/client"
@@ -90,24 +89,7 @@ func (c *Client) DeleteInstance(ctx context.Context, instanceName string) error 
 }
 
 func New() (*Client, error) {
-	clientCert, err := os.ReadFile("client.crt")
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client certificate: %w", err)
-	}
-
-	clientKey, err := os.ReadFile("client.key")
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client key: %w", err)
-	}
-
-	ip := "62.84.113.137"
-
-	client, err := client.ConnectIncus(fmt.Sprintf("https://%s:8443", ip), &client.ConnectionArgs{
-		TLSClientCert:      string(clientCert),
-		TLSClientKey:       string(clientKey),
-		InsecureSkipVerify: true,
-	})
-	// client, err := client.ConnectIncusUnix("", nil)
+	client, err := client.ConnectIncusUnix("", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Incus: %w", err)
 	}
