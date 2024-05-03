@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/danilkaz/hogwarts-cloud/hogctl/internal/deployer"
 	"github.com/danilkaz/hogwarts-cloud/hogctl/internal/incus"
@@ -71,5 +72,7 @@ func init() {
 }
 
 func main() {
-	root.Execute()
+	if err := root.Execute(); err != nil {
+		os.Exit(1)
+	}
 }
