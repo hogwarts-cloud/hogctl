@@ -1,18 +1,39 @@
 package models
 
+import (
+	"net"
+	"time"
+)
+
 type Instance struct {
-	Name      string    `yaml:"name"`
-	Resources Resources `yaml:"resources"`
-	User      User      `yaml:"user"`
+	Name           string
+	Resources      InstanceResources
+	User           User
+	ExpirationDate time.Time
 }
 
-type Resources struct {
-	Flavor Flavor `yaml:"flavor"`
-	Disk   int    `yaml:"disk"`
+func (i Instance) IsExpired() bool {
+	return time.Now().After(i.ExpirationDate)
+}
+
+type LaunchConfig struct {
+	Instance
+	IP net.IP
+}
+
+type InstanceResources struct {
+	Flavor string
+	Disk   int
 }
 
 type User struct {
-	Name      string `yaml:"name"`
-	Email     string `yaml:"email"`
-	PublicKey string `yaml:"publicKey"`
+	Name      string
+	Email     string
+	PublicKey string
+}
+
+type LaunchedInstanceInfo struct {
+	Name string
+	IP   net.IP
+	Port int
 }

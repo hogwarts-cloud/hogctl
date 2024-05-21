@@ -3,65 +3,118 @@ package incus
 import (
 	"context"
 	"fmt"
+	"net"
+	"strings"
+	"text/template"
 
-	"github.com/danilkaz/hogwarts-cloud/hogctl/internal/models"
-	client "github.com/lxc/incus/client"
+	"github.com/hogwarts-cloud/hogctl/internal/models"
+	"github.com/hogwarts-cloud/hogctl/pkg/constants"
+	incus "github.com/lxc/incus/client"
 	"github.com/lxc/incus/shared/api"
-	"github.com/samber/lo"
 )
 
-var (
-	UserData = `#cloud-config
-users:
-- name: %s
-  sudo: ALL=(ALL) NOPASSWD:ALL
-  shell: /bin/bash
-  ssh_authorized_keys:
-  - %s`
-	NetworkConfig = `version: 2
-ethernets:
-  eth0:
-    addresses:
-    - %s/24
-    gateway4: 10.10.10.1
-    nameservers:
-      addresses:
-      - 10.10.10.1`
+const (
+	AddressFamily          = "inet"
+	EmailKey               = "user.email"
+	CloudInitNetworkConfig = "cloud-init.network-config"
+	CloudInitUserData      = "cloud-init.user-data"
 )
 
-type Client struct {
-	client client.InstanceServer
+type Incus struct {
+	server    incus.InstanceServer
+	cluster   models.Cluster
+	templates *template.Template
 }
 
-func (c *Client) GetInstanceNames(ctx context.Context) ([]string, error) {
-	instances, err := c.client.GetInstances(api.InstanceTypeContainer)
+func (i *Incus) GetClusterInfo(ctx context.Context) (models.ClusterInfo, error) {
+	incusInstances, err := i.server.GetInstancesFull(api.InstanceTypeContainer)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get instances: %w", err)
+		return models.ClusterInfo{}, fmt.Errorf("failed to get instances full: %w", err)
 	}
 
-	return lo.Map(instances, func(instance api.Instance, _ int) string {
-		return instance.Name
-	}), nil
+	instances := make([]models.InstanceInfo, 0, len(incusInstances))
+	ips := make([]net.IP, 0, len(incusInstances))
+	for _, instance := range incusInstances {
+		var ip net.IP
+		for _, address := range instance.State.Network[i.cluster.Network.NIC].Addresses {
+			if address.Family == AddressFamily {
+				ip = net.ParseIP(address.Address)
+				break
+			}
+		}
+
+		info := models.InstanceInfo{
+			Name:  instance.Name,
+			Email: instance.Config[EmailKey],
+		}
+
+		instances = append(instances, info)
+		ips = append(ips, ip)
+	}
+
+	info := models.ClusterInfo{
+		Instances: instances,
+		IPs:       ips,
+	}
+
+	return info, nil
 }
 
-func (c *Client) LaunchInstance(ctx context.Context, instance *models.Instance) error {
-	op, err := c.client.CreateInstance(api.InstancesPost{
+func (i *Incus) LaunchInstance(ctx context.Context, instance models.LaunchConfig) error {
+	networkConfigBuf := &strings.Builder{}
+	mask, _ := i.cluster.Network.CIDR.Mask.Size()
+	if err := i.templates.ExecuteTemplate(
+		networkConfigBuf,
+		CloudInitNetworkConfig+constants.TemplateExtension,
+		map[string]any{"Network": i.cluster.Network, "IP": instance.IP.String(), "Mask": mask},
+	); err != nil {
+		return fmt.Errorf("failed to execute network config template: %w", err)
+	}
+
+	userDataBuf := &strings.Builder{}
+	if err := i.templates.ExecuteTemplate(
+		userDataBuf,
+		CloudInitUserData+constants.TemplateExtension,
+		instance.User,
+	); err != nil {
+		return fmt.Errorf("failed to execute user data template: %w", err)
+	}
+
+	var cpu, memory int
+	for _, availableFlavor := range i.cluster.Flavors {
+		if instance.Resources.Flavor == availableFlavor.Name {
+			cpu = availableFlavor.Resources.CPU
+			memory = availableFlavor.Resources.Memory
+			break
+		}
+	}
+
+	op, err := i.server.CreateInstance(api.InstancesPost{
 		InstancePut: api.InstancePut{
 			Config: map[string]string{
-				"limits.cpu": instance.Resources.Flavor.CPU(),
-				// "limits.memory":             instance.Flavor.Memory(), // wtf
-				"cloud-init.network-config": fmt.Sprintf(NetworkConfig, "10.10.10.100"),
-				"snapshots.schedule":        "*/5 * * * *",
-				"cloud-init.user-data":      fmt.Sprintf(UserData, instance.User.Name, instance.User.PublicKey),
-				"user.email":                instance.User.Email,
+				EmailKey:               instance.User.Email,
+				CloudInitNetworkConfig: networkConfigBuf.String(),
+				CloudInitUserData:      userDataBuf.String(),
+				"limits.cpu":           fmt.Sprintf("%d", cpu),
+				"limits.memory":        fmt.Sprintf("%dGB", memory),
 			},
 			Devices: map[string]map[string]string{
-				"eth0": {"type": "nic", "name": "eth0", "network": "incusbr0"},
-				"root": {"type": "disk", "path": "/", "pool": "incuslvm", "size": fmt.Sprintf("%dGB", instance.Resources.Disk)},
+				i.cluster.Network.NIC: {
+					"type":    "nic",
+					"nictype": "bridged",
+					"name":    i.cluster.Network.NIC,
+					"parent":  i.cluster.Network.Bridge,
+				},
+				"root": {
+					"type": "disk",
+					"path": "/",
+					"pool": i.cluster.Storage.Pool,
+					"size": fmt.Sprintf("%dGB", instance.Resources.Disk),
+				},
 			},
 		},
 		Name:   instance.Name,
-		Source: api.InstanceSource{Type: "image", Alias: "hogwarts-cloud-image"},
+		Source: api.InstanceSource{Type: "image", Alias: i.cluster.Image},
 		Type:   api.InstanceTypeContainer,
 		Start:  true,
 	})
@@ -76,8 +129,12 @@ func (c *Client) LaunchInstance(ctx context.Context, instance *models.Instance) 
 	return nil
 }
 
-func (c *Client) DeleteInstance(ctx context.Context, instanceName string) error {
-	op, err := c.client.DeleteInstance(instanceName)
+func (i *Incus) DeleteInstance(ctx context.Context, instance string) error {
+	if err := i.stopInstance(ctx, instance); err != nil {
+		return fmt.Errorf("failed to stop instance: %w", err)
+	}
+
+	op, err := i.server.DeleteInstance(instance)
 	if err != nil {
 		return fmt.Errorf("failed to delete instance: %w", err)
 	}
@@ -89,11 +146,30 @@ func (c *Client) DeleteInstance(ctx context.Context, instanceName string) error 
 	return nil
 }
 
-func New() (*Client, error) {
-	client, err := client.ConnectIncusUnix("", nil)
+func (i *Incus) stopInstance(ctx context.Context, instance string) error {
+	op, err := i.server.UpdateInstanceState(instance, api.InstanceStatePut{
+		Action: "stop",
+	}, "")
+	if err != nil {
+		return fmt.Errorf("failed to stop instance: %w", err)
+	}
+
+	if err := op.WaitContext(ctx); err != nil {
+		return fmt.Errorf("failed to wait stop instance operation: %w", err)
+	}
+
+	return nil
+}
+
+func New(cluster models.Cluster, templates *template.Template) (*Incus, error) {
+	server, err := incus.ConnectIncusUnix("", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Incus: %w", err)
 	}
 
-	return &Client{client: client}, nil
+	return &Incus{
+		server:    server,
+		cluster:   cluster,
+		templates: templates,
+	}, nil
 }

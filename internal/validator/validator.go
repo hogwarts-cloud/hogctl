@@ -4,13 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
-	"slices"
 
-	"github.com/danilkaz/hogwarts-cloud/hogctl/internal/models"
+	"github.com/hogwarts-cloud/hogctl/internal/models"
+	"github.com/samber/lo"
 	"golang.org/x/crypto/ssh"
 )
 
 var (
+	ErrEmptyInstancesList           = errors.New("empty instances list")
 	ErrEmptyInstanceName            = errors.New("instance name is empty")
 	ErrInstanceNameTooBig           = errors.New("instance name is too big (max 256 characters)")
 	ErrInvalidFlavor                = errors.New("invalid flavor")
@@ -22,12 +23,20 @@ var (
 	ErrFoundDuplicatedInstanceNames = errors.New("found duplicated instance names")
 )
 
-func Validate(instances []*models.Instance) error {
+type Validator struct {
+	flavors []models.Flavor
+}
+
+func (v *Validator) Validate(instances []models.Instance) error {
+	if len(instances) == 0 {
+		return ErrEmptyInstancesList
+	}
+
 	set := make(map[string]struct{}, len(instances))
 
 	for _, instance := range instances {
 		set[instance.Name] = struct{}{}
-		if err := validateInstance(instance); err != nil {
+		if err := v.validateInstance(instance); err != nil {
 			return fmt.Errorf("failed to validate instance '%s': %w", instance.Name, err)
 		}
 	}
@@ -39,7 +48,7 @@ func Validate(instances []*models.Instance) error {
 	return nil
 }
 
-func validateInstance(instance *models.Instance) error {
+func (v *Validator) validateInstance(instance models.Instance) error {
 	if len(instance.Name) == 0 {
 		return ErrEmptyInstanceName
 	}
@@ -48,7 +57,9 @@ func validateInstance(instance *models.Instance) error {
 		return ErrInstanceNameTooBig
 	}
 
-	if !slices.Contains(models.AvailableFlavors, instance.Resources.Flavor) {
+	if !lo.ContainsBy(v.flavors, func(flavor models.Flavor) bool {
+		return flavor.Name == instance.Resources.Flavor
+	}) {
 		return ErrInvalidFlavor
 	}
 
@@ -73,4 +84,8 @@ func validateInstance(instance *models.Instance) error {
 	}
 
 	return nil
+}
+
+func New(flavors []models.Flavor) *Validator {
+	return &Validator{flavors: flavors}
 }
