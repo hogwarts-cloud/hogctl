@@ -49,13 +49,3 @@ type Network struct {
 type Mail struct {
 	Server string
 }
-
-type ClusterInfo struct {
-	Instances []InstanceInfo
-	IPs       []net.IP
-}
-
-type InstanceInfo struct {
-	Name  string
-	Email string
-}

@@ -8,8 +8,8 @@ import (
 	"text/template"
 
 	"github.com/hogwarts-cloud/hogctl/internal/models"
+	"github.com/hogwarts-cloud/hogctl/internal/network"
 	"github.com/hogwarts-cloud/hogctl/pkg/constants"
-	"github.com/hogwarts-cloud/hogctl/pkg/utils"
 	"github.com/samber/lo"
 	"golang.org/x/sync/errgroup"
 )
@@ -23,13 +23,14 @@ const (
 )
 
 type IncusProvider interface {
-	GetClusterInfo(ctx context.Context) (models.ClusterInfo, error)
+	GetLaunchedInstances(ctx context.Context) ([]models.InstanceInfo, error)
+	GetInstanceIP(ctx context.Context, instance string) (net.IP, error)
 	LaunchInstance(ctx context.Context, instance models.LaunchConfig) error
 	DeleteInstance(ctx context.Context, instance string) error
 }
 
 type Mailer interface {
-	Mail(recipient, subject, text string) error
+	SendMail(recipient, subject, text string) error
 }
 
 type Config struct {
@@ -48,54 +49,72 @@ type Applier struct {
 	mailTemplates *template.Template
 }
 
-func (a *Applier) Apply(ctx context.Context, targetInstances []models.Instance) ([]models.LaunchedInstanceInfo, error) {
-	clusterInfo, err := a.incus.GetClusterInfo(ctx)
+func (a *Applier) Apply(ctx context.Context, targetInstances []models.Instance) (models.ApplyResult, error) {
+	launchedInstances, err := a.incus.GetLaunchedInstances(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get existing instances: %w", err)
+		return models.ApplyResult{}, fmt.Errorf("failed to get existing instances: %w", err)
 	}
 
 	instancesToDelete := make([]models.InstanceInfo, 0)
-	for _, existingInstance := range clusterInfo.Instances {
+	for _, launchedInstance := range launchedInstances {
 		targetInstancesContains := lo.ContainsBy(targetInstances, func(targetInstance models.Instance) bool {
-			return targetInstance.Name == existingInstance.Name
+			return targetInstance.Name == launchedInstance.Name
 		})
 
 		if !targetInstancesContains {
-			instancesToDelete = append(instancesToDelete, existingInstance)
+			instancesToDelete = append(instancesToDelete, launchedInstance)
 		}
 	}
 
 	instancesToLaunch := make([]models.Instance, 0)
 	for _, targetInstance := range targetInstances {
-		existingsInstancesContains := lo.ContainsBy(clusterInfo.Instances, func(existingInstance models.InstanceInfo) bool {
-			return targetInstance.Name == existingInstance.Name
+		launchedInstancesContains := lo.ContainsBy(launchedInstances, func(launchedInstance models.InstanceInfo) bool {
+			return targetInstance.Name == launchedInstance.Name
 		})
 
 		if targetInstance.IsExpired() {
+			ip, err := a.incus.GetInstanceIP(ctx, targetInstance.Name)
+			if err != nil {
+				return models.ApplyResult{}, fmt.Errorf("failed to get instance ip: %w", err)
+			}
+
 			info := models.InstanceInfo{
 				Name:  targetInstance.Name,
 				Email: targetInstance.User.Email,
+				InstanceNetworkInfo: models.InstanceNetworkInfo{
+					IP:            ip,
+					ForwardedPort: network.GeneratePortByIP(ip),
+				},
 			}
 
 			instancesToDelete = append(instancesToDelete, info)
 			continue
 		}
 
-		if !existingsInstancesContains {
+		if !launchedInstancesContains {
 			instancesToLaunch = append(instancesToLaunch, targetInstance)
 		}
 	}
 
 	if err := a.deleteInstances(ctx, instancesToDelete); err != nil {
-		return nil, fmt.Errorf("failed to delete instances: %w", err)
+		return models.ApplyResult{}, fmt.Errorf("failed to delete instances: %w", err)
 	}
 
-	launchConfigs, err := a.launchInstances(ctx, instancesToLaunch, clusterInfo.IPs)
+	occupiedIPs := lo.Map(launchedInstances, func(launchedInstance models.InstanceInfo, _ int) net.IP {
+		return launchedInstance.IP
+	})
+
+	newlyLaunchedInstances, err := a.launchInstances(ctx, instancesToLaunch, occupiedIPs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to launch instances: %w", err)
+		return models.ApplyResult{}, fmt.Errorf("failed to launch instances: %w", err)
 	}
 
-	return launchConfigs, nil
+	result := models.ApplyResult{
+		Launched: newlyLaunchedInstances,
+		Deleted:  instancesToDelete,
+	}
+
+	return result, nil
 }
 
 func (a *Applier) deleteInstances(ctx context.Context, instances []models.InstanceInfo) error {
@@ -105,32 +124,34 @@ func (a *Applier) deleteInstances(ctx context.Context, instances []models.Instan
 	for _, instance := range instances {
 		instance := instance
 
-		eg.Go(func() error {
-			if err := a.incus.DeleteInstance(ctx, instance.Name); err != nil {
-				return fmt.Errorf("failed to delete instance: %w", err)
-			}
-
-			buf := &strings.Builder{}
-			if err := a.mailTemplates.ExecuteTemplate(
-				buf,
-				InstanceDeletedTemplate+constants.TemplateExtension,
-				instance,
-			); err != nil {
-				return fmt.Errorf("failed to execute instance deleted template: %w", err)
-			}
-
-			if err := a.mailer.Mail(instance.Email, SubjectInstanceDeleted, buf.String()); err != nil {
-				return fmt.Errorf("failed to mail about delete instance: %w", err)
-			}
-
-			return nil
-		})
+		eg.Go(func() error { return a.deleteInstance(ctx, instance) })
 	}
 
 	return eg.Wait()
 }
 
-func (a *Applier) launchInstances(ctx context.Context, instances []models.Instance, occupiedInstancesIPs []net.IP) ([]models.LaunchedInstanceInfo, error) {
+func (a *Applier) deleteInstance(ctx context.Context, instance models.InstanceInfo) error {
+	if err := a.incus.DeleteInstance(ctx, instance.Name); err != nil {
+		return fmt.Errorf("failed to delete instance: %w", err)
+	}
+
+	buf := &strings.Builder{}
+	if err := a.mailTemplates.ExecuteTemplate(
+		buf,
+		InstanceDeletedTemplate+constants.TemplateExtension,
+		instance,
+	); err != nil {
+		return fmt.Errorf("failed to execute instance deleted template: %w", err)
+	}
+
+	if err := a.mailer.SendMail(instance.Email, SubjectInstanceDeleted, buf.String()); err != nil {
+		return fmt.Errorf("failed to mail about delete instance: %w", err)
+	}
+
+	return nil
+}
+
+func (a *Applier) launchInstances(ctx context.Context, instances []models.Instance, occupiedInstancesIPs []net.IP) ([]models.InstanceInfo, error) {
 	if len(instances) == 0 {
 		return nil, nil
 	}
@@ -138,59 +159,65 @@ func (a *Applier) launchInstances(ctx context.Context, instances []models.Instan
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.SetLimit(MaxConcurrentRequests)
 
-	ips, err := utils.GetAvailableIPs(len(instances), a.cidr, append(a.occupiedIPs, occupiedInstancesIPs...))
+	ips, err := network.GetAvailableIPs(len(instances), a.cidr, append(a.occupiedIPs, occupiedInstancesIPs...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available ips: %w", err)
 	}
 
 	ipIndex := 0
 
-	launchedInstancesInfo := make([]models.LaunchedInstanceInfo, 0, len(instances))
+	instancesInfo := make([]models.InstanceInfo, 0, len(instances))
 	for _, instance := range instances {
 		ip := ips[ipIndex]
 		ipIndex++
 
+		instanceNetworkInfo := models.InstanceNetworkInfo{
+			IP:            ip,
+			ForwardedPort: network.GeneratePortByIP(ip),
+		}
+
+		instanceInfo := models.InstanceInfo{
+			Name:                instance.Name,
+			Email:               instance.User.Email,
+			InstanceNetworkInfo: instanceNetworkInfo,
+		}
+
 		launchConfig := models.LaunchConfig{
-			Instance: instance,
-			IP:       ip,
+			Instance:            instance,
+			InstanceNetworkInfo: instanceNetworkInfo,
 		}
 
-		launchedInstanceInfo := models.LaunchedInstanceInfo{
-			Name: instance.Name,
-			IP:   ip,
-			Port: 62000 + int(ip.To4()[3]),
-		}
+		instancesInfo = append(instancesInfo, instanceInfo)
 
-		launchedInstancesInfo = append(launchedInstancesInfo, launchedInstanceInfo)
-
-		eg.Go(func() error {
-			if err := a.incus.LaunchInstance(ctx, launchConfig); err != nil {
-				return fmt.Errorf("failed to launch instance: %w", err)
-			}
-
-			buf := &strings.Builder{}
-			if err := a.mailTemplates.ExecuteTemplate(
-				buf,
-				InstanceCreatedTemplate+constants.TemplateExtension,
-				map[string]any{"Name": launchedInstanceInfo.Name, "Domain": a.domain, "Port": launchedInstanceInfo.Port},
-			); err != nil {
-				return fmt.Errorf("failed to execute instance created template: %w", err)
-			}
-
-			if err := a.mailer.Mail(launchConfig.User.Email, SubjectInstanceCreated, buf.String()); err != nil {
-				return fmt.Errorf("failed to mail about launch: %w", err)
-			}
-
-			return nil
-		})
-
+		eg.Go(func() error { return a.launchInstance(ctx, launchConfig) })
 	}
 
 	if err := eg.Wait(); err != nil {
 		return nil, err
 	}
 
-	return launchedInstancesInfo, nil
+	return instancesInfo, nil
+}
+
+func (a *Applier) launchInstance(ctx context.Context, instance models.LaunchConfig) error {
+	if err := a.incus.LaunchInstance(ctx, instance); err != nil {
+		return fmt.Errorf("failed to launch instance: %w", err)
+	}
+
+	buf := &strings.Builder{}
+	if err := a.mailTemplates.ExecuteTemplate(
+		buf,
+		InstanceCreatedTemplate+constants.TemplateExtension,
+		map[string]any{"Name": instance.Name, "Domain": a.domain, "Port": instance.ForwardedPort},
+	); err != nil {
+		return fmt.Errorf("failed to execute instance created template: %w", err)
+	}
+
+	if err := a.mailer.SendMail(instance.User.Email, SubjectInstanceCreated, buf.String()); err != nil {
+		return fmt.Errorf("failed to mail about launch: %w", err)
+	}
+
+	return nil
 }
 
 func New(incus IncusProvider, notifier Mailer, cfg Config) *Applier {

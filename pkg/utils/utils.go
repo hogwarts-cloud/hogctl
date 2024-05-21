@@ -1,34 +1,10 @@
 package utils
 
 import (
-	"errors"
 	"net"
 )
 
-var ErrTooFewAvailableIPs = errors.New("too few available ips")
-
-func GetAvailableIPs(count int, network net.IPNet, occupiedIPs []net.IP) ([]net.IP, error) {
-	var ips []net.IP
-
-loop:
-	for _, ip := range getAllNetworkIPs(network) {
-		for _, occupiedIP := range occupiedIPs {
-			if occupiedIP.Equal(ip) {
-				continue loop
-			}
-		}
-
-		ips = append(ips, ip)
-
-		if len(ips) == count {
-			return ips, nil
-		}
-	}
-
-	return nil, ErrTooFewAvailableIPs
-}
-
-func getAllNetworkIPs(network net.IPNet) []net.IP {
+func GetAllNetworkIPs(network net.IPNet) []net.IP {
 	var ips []net.IP
 	ip := network.IP
 

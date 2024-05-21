@@ -94,7 +94,7 @@ var apply = &cobra.Command{
 }
 
 func init() {
-	root.PersistentFlags().StringVar(&configPath, "config", "", "Path to config")
+	root.PersistentFlags().StringVar(&configPath, "config", "", "Path to config directory")
 	root.MarkPersistentFlagRequired("config")
 	root.AddCommand(validate, apply)
 }

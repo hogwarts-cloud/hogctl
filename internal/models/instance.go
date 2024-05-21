@@ -16,11 +16,6 @@ func (i Instance) IsExpired() bool {
 	return time.Now().After(i.ExpirationDate)
 }
 
-type LaunchConfig struct {
-	Instance
-	IP net.IP
-}
-
 type InstanceResources struct {
 	Flavor string
 	Disk   int
@@ -32,8 +27,23 @@ type User struct {
 	PublicKey string
 }
 
-type LaunchedInstanceInfo struct {
-	Name string
-	IP   net.IP
-	Port int
+type InstanceNetworkInfo struct {
+	IP            net.IP `yaml:"ip"`
+	ForwardedPort int    `yaml:"port"`
+}
+
+type LaunchConfig struct {
+	Instance
+	InstanceNetworkInfo
+}
+
+type InstanceInfo struct {
+	Name                string `yaml:"name"`
+	Email               string `yaml:"email"`
+	InstanceNetworkInfo `yaml:"network"`
+}
+
+type ApplyResult struct {
+	Launched []InstanceInfo `yaml:"launched"`
+	Deleted  []InstanceInfo `yaml:"deleted"`
 }

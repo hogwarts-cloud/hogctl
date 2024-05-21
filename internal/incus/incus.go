@@ -2,12 +2,14 @@ package incus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"text/template"
 
 	"github.com/hogwarts-cloud/hogctl/internal/models"
+	"github.com/hogwarts-cloud/hogctl/internal/network"
 	"github.com/hogwarts-cloud/hogctl/pkg/constants"
 	incus "github.com/lxc/incus/client"
 	"github.com/lxc/incus/shared/api"
@@ -20,44 +22,56 @@ const (
 	CloudInitUserData      = "cloud-init.user-data"
 )
 
+var (
+	ErrNoSuchAddressFamily = errors.New("no such address family")
+)
+
 type Incus struct {
 	server    incus.InstanceServer
 	cluster   models.Cluster
 	templates *template.Template
 }
 
-func (i *Incus) GetClusterInfo(ctx context.Context) (models.ClusterInfo, error) {
+func (i *Incus) GetLaunchedInstances(ctx context.Context) ([]models.InstanceInfo, error) {
 	incusInstances, err := i.server.GetInstancesFull(api.InstanceTypeContainer)
 	if err != nil {
-		return models.ClusterInfo{}, fmt.Errorf("failed to get instances full: %w", err)
+		return nil, fmt.Errorf("failed to get instances full: %w", err)
 	}
 
-	instances := make([]models.InstanceInfo, 0, len(incusInstances))
-	ips := make([]net.IP, 0, len(incusInstances))
+	launchedInstances := make([]models.InstanceInfo, 0, len(incusInstances))
 	for _, instance := range incusInstances {
-		var ip net.IP
-		for _, address := range instance.State.Network[i.cluster.Network.NIC].Addresses {
-			if address.Family == AddressFamily {
-				ip = net.ParseIP(address.Address)
-				break
-			}
+		ip, err := getInstanceIPFromState(instance.State, i.cluster.Network.NIC)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get instance ip from state: %w", err)
 		}
 
 		info := models.InstanceInfo{
 			Name:  instance.Name,
 			Email: instance.Config[EmailKey],
+			InstanceNetworkInfo: models.InstanceNetworkInfo{
+				IP:            ip,
+				ForwardedPort: network.GeneratePortByIP(ip),
+			},
 		}
 
-		instances = append(instances, info)
-		ips = append(ips, ip)
+		launchedInstances = append(launchedInstances, info)
 	}
 
-	info := models.ClusterInfo{
-		Instances: instances,
-		IPs:       ips,
+	return launchedInstances, nil
+}
+
+func (i *Incus) GetInstanceIP(ctx context.Context, instance string) (net.IP, error) {
+	instanceState, _, err := i.server.GetInstanceState(instance)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get instance state: %w", err)
 	}
 
-	return info, nil
+	ip, err := getInstanceIPFromState(instanceState, i.cluster.Network.NIC)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get instance ip from state: %w", err)
+	}
+
+	return ip, nil
 }
 
 func (i *Incus) LaunchInstance(ctx context.Context, instance models.LaunchConfig) error {
@@ -172,4 +186,14 @@ func New(cluster models.Cluster, templates *template.Template) (*Incus, error) {
 		cluster:   cluster,
 		templates: templates,
 	}, nil
+}
+
+func getInstanceIPFromState(state *api.InstanceState, nic string) (net.IP, error) {
+	for _, address := range state.Network[nic].Addresses {
+		if address.Family == AddressFamily {
+			return net.ParseIP(address.Address), nil
+		}
+	}
+
+	return nil, ErrNoSuchAddressFamily
 }
