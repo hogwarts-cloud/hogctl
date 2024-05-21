@@ -34,7 +34,7 @@ var validate = &cobra.Command{
 		cmd.SilenceUsage = true
 		cfg := config.Load(configPath)
 
-		validator := validator.New(cfg.Cluster.Flavors)
+		validator := validator.New(cfg.Cluster.Flavors, cfg.Cluster.Domain)
 
 		if err := validator.Validate(cfg.Instances); err != nil {
 			return fmt.Errorf("failed to validate instances: %w", err)

@@ -4,27 +4,33 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"strings"
+	"time"
 
 	"github.com/hogwarts-cloud/hogctl/internal/models"
 	"github.com/samber/lo"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/net/idna"
 )
 
 var (
 	ErrEmptyInstancesList           = errors.New("empty instances list")
-	ErrEmptyInstanceName            = errors.New("instance name is empty")
-	ErrInstanceNameTooBig           = errors.New("instance name is too big (max 256 characters)")
+	ErrEmptyInstanceName            = errors.New("empty instance name")
+	ErrInvalidInstanceName          = errors.New("invalid instance name")
+	ErrInstanceNameTooBig           = errors.New("instance name too big")
 	ErrInvalidFlavor                = errors.New("invalid flavor")
-	ErrNonPositiveDiskSize          = errors.New("disk size must be positive")
-	ErrEmptyUserName                = errors.New("user name is empty")
-	ErrUserNameTooBig               = errors.New("user name is too big (max 256 characters)")
+	ErrNonPositiveDiskSize          = errors.New("non positive disk size")
+	ErrEmptyUserName                = errors.New("empty user name")
+	ErrUserNameTooBig               = errors.New("user name too big")
 	ErrInvalidEmail                 = errors.New("invalid email")
 	ErrInvalidPublicKey             = errors.New("invalid public key")
+	ErrExpiredInstance              = errors.New("expired instance")
 	ErrFoundDuplicatedInstanceNames = errors.New("found duplicated instance names")
 )
 
 type Validator struct {
 	flavors []models.Flavor
+	domain  string
 }
 
 func (v *Validator) Validate(instances []models.Instance) error {
@@ -53,8 +59,13 @@ func (v *Validator) validateInstance(instance models.Instance) error {
 		return ErrEmptyInstanceName
 	}
 
-	if len(instance.Name) > 256 {
+	if len(instance.Name) > 64 {
 		return ErrInstanceNameTooBig
+	}
+
+	if _, err := idna.Lookup.ToASCII(fmt.Sprintf("%s.%s", instance.Name, v.domain)); err != nil ||
+		strings.Contains(instance.Name, ".") {
+		return ErrInvalidInstanceName
 	}
 
 	if !lo.ContainsBy(v.flavors, func(flavor models.Flavor) bool {
@@ -71,7 +82,7 @@ func (v *Validator) validateInstance(instance models.Instance) error {
 		return ErrEmptyUserName
 	}
 
-	if len(instance.User.Name) > 256 {
+	if len(instance.User.Name) > 64 {
 		return ErrUserNameTooBig
 	}
 
@@ -83,9 +94,16 @@ func (v *Validator) validateInstance(instance models.Instance) error {
 		return ErrInvalidPublicKey
 	}
 
+	if instance.ExpirationDate.Before(time.Now()) {
+		return ErrExpiredInstance
+	}
+
 	return nil
 }
 
-func New(flavors []models.Flavor) *Validator {
-	return &Validator{flavors: flavors}
+func New(flavors []models.Flavor, domain string) *Validator {
+	return &Validator{
+		flavors: flavors,
+		domain:  domain,
+	}
 }
