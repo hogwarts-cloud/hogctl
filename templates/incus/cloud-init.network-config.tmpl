@@ -1,0 +1,11 @@
+version: 2
+ethernets:
+  {{ .Network.NIC }}:
+    addresses:
+    - {{ .IP }}/{{ printf "%d" .Mask }}
+    gateway4: {{ printf "%s" .Network.Gateway }}
+    nameservers:
+      addresses:
+{{- range $nameserver := .Network.Nameservers }}
+        - {{ printf "%s" $nameserver }}
+{{- end }}

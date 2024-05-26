@@ -1,0 +1,25 @@
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: release linux/amd64
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Upload binary artifact
+      uses: wangyoucao577/go-release-action@v1
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        goversion: 1.22.3
+        goos: linux
+        goarch: amd64
+        compress_assets: false
+        md5sum: false
