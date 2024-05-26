@@ -1,4 +1,4 @@
-package mailer
+package mail
 
 import (
 	"fmt"
@@ -9,18 +9,18 @@ var (
 	MessageTemplate = "Content-Type: text/html\r\nFrom: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s\r\n"
 )
 
-type Mailer struct {
-	address string
-	sender  string
+type Sender struct {
+	serverAddress string
+	senderName    string
 }
 
-func (m *Mailer) SendMail(recipient, subject, text string) error {
-	client, err := smtp.Dial(m.address)
+func (s *Sender) Send(recipient, subject, text string) error {
+	client, err := smtp.Dial(s.serverAddress)
 	if err != nil {
 		return fmt.Errorf("failed to connect to smtp server: %w", err)
 	}
 
-	if err := client.Mail(m.sender); err != nil {
+	if err := client.Mail(s.senderName); err != nil {
 		return fmt.Errorf("failed to set sender: %w", err)
 	}
 
@@ -33,7 +33,7 @@ func (m *Mailer) SendMail(recipient, subject, text string) error {
 		return fmt.Errorf("failed to create writer: %w", err)
 	}
 
-	_, err = fmt.Fprintf(writer, MessageTemplate, m.sender, recipient, subject, text)
+	_, err = fmt.Fprintf(writer, MessageTemplate, s.senderName, recipient, subject, text)
 	if err != nil {
 		return fmt.Errorf("failed to write message: %w", err)
 	}
@@ -49,11 +49,9 @@ func (m *Mailer) SendMail(recipient, subject, text string) error {
 	return nil
 }
 
-func New(address string) *Mailer {
-	sender := "root@hog26.urgu.org" //todo
-
-	return &Mailer{
-		address: address,
-		sender:  sender,
+func NewSender(address, senderName string) *Sender {
+	return &Sender{
+		serverAddress: address,
+		senderName:    senderName,
 	}
 }

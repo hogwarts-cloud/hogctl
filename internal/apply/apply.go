@@ -1,4 +1,4 @@
-package applier
+package apply
 
 import (
 	"context"
@@ -22,37 +22,41 @@ const (
 	InstanceDeletedTemplate = "deleted"
 )
 
+//go:generate mockgen -source apply.go -destination mocks/incus_provider.go -package mocks
 type IncusProvider interface {
 	GetLaunchedInstances(ctx context.Context) ([]models.InstanceInfo, error)
 	GetInstanceIP(ctx context.Context, instance string) (net.IP, error)
-	LaunchInstance(ctx context.Context, instance models.LaunchConfig) error
+	LaunchInstance(ctx context.Context, instance models.LaunchConfig, async bool) error
 	DeleteInstance(ctx context.Context, instance string) error
 }
 
-type Mailer interface {
-	SendMail(recipient, subject, text string) error
+//go:generate mockgen -source apply.go -destination mocks/mail_sender.go -package mocks
+type MailSender interface {
+	Send(recipient, subject, text string) error
 }
 
 type Config struct {
+	Incus         IncusProvider
+	MailSender    MailSender
 	Domain        string
 	CIDR          net.IPNet
 	OccupiedIPs   []net.IP
 	MailTemplates *template.Template
 }
 
-type Applier struct {
+type ApplyCmd struct {
 	incus         IncusProvider
-	mailer        Mailer
+	mailSender    MailSender
 	domain        string
 	cidr          net.IPNet
 	occupiedIPs   []net.IP
 	mailTemplates *template.Template
 }
 
-func (a *Applier) Apply(ctx context.Context, targetInstances []models.Instance) (models.ApplyResult, error) {
+func (a *ApplyCmd) Run(ctx context.Context, targetInstances []models.Instance) (models.ApplyResult, error) {
 	launchedInstances, err := a.incus.GetLaunchedInstances(ctx)
 	if err != nil {
-		return models.ApplyResult{}, fmt.Errorf("failed to get existing instances: %w", err)
+		return models.ApplyResult{}, fmt.Errorf("failed to get launched instances: %w", err)
 	}
 
 	instancesToDelete := make([]models.InstanceInfo, 0)
@@ -79,8 +83,11 @@ func (a *Applier) Apply(ctx context.Context, targetInstances []models.Instance) 
 			}
 
 			info := models.InstanceInfo{
-				Name:  targetInstance.Name,
-				Email: targetInstance.User.Email,
+				Name: targetInstance.Name,
+				InstanceUserInfo: models.InstanceUserInfo{
+					Name:  targetInstance.User.Name,
+					Email: targetInstance.User.Email,
+				},
 				InstanceNetworkInfo: models.InstanceNetworkInfo{
 					IP:            ip,
 					ForwardedPort: network.GeneratePortByIP(ip),
@@ -117,7 +124,7 @@ func (a *Applier) Apply(ctx context.Context, targetInstances []models.Instance) 
 	return result, nil
 }
 
-func (a *Applier) deleteInstances(ctx context.Context, instances []models.InstanceInfo) error {
+func (a *ApplyCmd) deleteInstances(ctx context.Context, instances []models.InstanceInfo) error {
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.SetLimit(MaxConcurrentRequests)
 
@@ -130,7 +137,7 @@ func (a *Applier) deleteInstances(ctx context.Context, instances []models.Instan
 	return eg.Wait()
 }
 
-func (a *Applier) deleteInstance(ctx context.Context, instance models.InstanceInfo) error {
+func (a *ApplyCmd) deleteInstance(ctx context.Context, instance models.InstanceInfo) error {
 	if err := a.incus.DeleteInstance(ctx, instance.Name); err != nil {
 		return fmt.Errorf("failed to delete instance: %w", err)
 	}
@@ -144,20 +151,17 @@ func (a *Applier) deleteInstance(ctx context.Context, instance models.InstanceIn
 		return fmt.Errorf("failed to execute instance deleted template: %w", err)
 	}
 
-	if err := a.mailer.SendMail(instance.Email, SubjectInstanceDeleted, buf.String()); err != nil {
-		return fmt.Errorf("failed to mail about delete instance: %w", err)
-	}
+	// if err := a.mailSender.Send(instance.Email, SubjectInstanceDeleted, buf.String()); err != nil {
+	// 	return fmt.Errorf("failed to mail about delete instance: %w", err)
+	// }
 
 	return nil
 }
 
-func (a *Applier) launchInstances(ctx context.Context, instances []models.Instance, occupiedInstancesIPs []net.IP) ([]models.InstanceInfo, error) {
+func (a *ApplyCmd) launchInstances(ctx context.Context, instances []models.Instance, occupiedInstancesIPs []net.IP) ([]models.InstanceInfo, error) {
 	if len(instances) == 0 {
 		return nil, nil
 	}
-
-	eg, ctx := errgroup.WithContext(ctx)
-	eg.SetLimit(MaxConcurrentRequests)
 
 	ips, err := network.GetAvailableIPs(len(instances), a.cidr, append(a.occupiedIPs, occupiedInstancesIPs...))
 	if err != nil {
@@ -171,6 +175,11 @@ func (a *Applier) launchInstances(ctx context.Context, instances []models.Instan
 		ip := ips[ipIndex]
 		ipIndex++
 
+		instanceUserInfo := models.InstanceUserInfo{
+			Name:  instance.User.Name,
+			Email: instance.User.Email,
+		}
+
 		instanceNetworkInfo := models.InstanceNetworkInfo{
 			IP:            ip,
 			ForwardedPort: network.GeneratePortByIP(ip),
@@ -178,7 +187,7 @@ func (a *Applier) launchInstances(ctx context.Context, instances []models.Instan
 
 		instanceInfo := models.InstanceInfo{
 			Name:                instance.Name,
-			Email:               instance.User.Email,
+			InstanceUserInfo:    instanceUserInfo,
 			InstanceNetworkInfo: instanceNetworkInfo,
 		}
 
@@ -189,18 +198,16 @@ func (a *Applier) launchInstances(ctx context.Context, instances []models.Instan
 
 		instancesInfo = append(instancesInfo, instanceInfo)
 
-		eg.Go(func() error { return a.launchInstance(ctx, launchConfig) })
-	}
-
-	if err := eg.Wait(); err != nil {
-		return nil, err
+		if err := a.launchInstance(ctx, launchConfig); err != nil {
+			return nil, fmt.Errorf("failed to launch instance: %w", err)
+		}
 	}
 
 	return instancesInfo, nil
 }
 
-func (a *Applier) launchInstance(ctx context.Context, instance models.LaunchConfig) error {
-	if err := a.incus.LaunchInstance(ctx, instance); err != nil {
+func (a *ApplyCmd) launchInstance(ctx context.Context, instance models.LaunchConfig) error {
+	if err := a.incus.LaunchInstance(ctx, instance, true); err != nil {
 		return fmt.Errorf("failed to launch instance: %w", err)
 	}
 
@@ -208,25 +215,25 @@ func (a *Applier) launchInstance(ctx context.Context, instance models.LaunchConf
 	if err := a.mailTemplates.ExecuteTemplate(
 		buf,
 		InstanceCreatedTemplate+constants.TemplateExtension,
-		map[string]any{"Name": instance.Name, "Domain": a.domain, "Port": instance.ForwardedPort},
+		map[string]any{"Name": instance.Name, "Domain": a.domain, "Port": instance.ForwardedPort, "User": instance.User.Name},
 	); err != nil {
 		return fmt.Errorf("failed to execute instance created template: %w", err)
 	}
 
-	if err := a.mailer.SendMail(instance.User.Email, SubjectInstanceCreated, buf.String()); err != nil {
-		return fmt.Errorf("failed to mail about launch: %w", err)
-	}
+	// if err := a.mailSender.Send(instance.User.Email, SubjectInstanceCreated, buf.String()); err != nil {
+	// 	return fmt.Errorf("failed to mail about launch: %w", err)
+	// }
 
 	return nil
 }
 
-func New(incus IncusProvider, notifier Mailer, cfg Config) *Applier {
-	return &Applier{
-		incus:         incus,
-		mailer:        notifier,
-		domain:        cfg.Domain,
-		cidr:          cfg.CIDR,
-		occupiedIPs:   cfg.OccupiedIPs,
-		mailTemplates: cfg.MailTemplates,
+func NewCmd(config Config) *ApplyCmd {
+	return &ApplyCmd{
+		incus:         config.Incus,
+		mailSender:    config.MailSender,
+		domain:        config.Domain,
+		cidr:          config.CIDR,
+		occupiedIPs:   config.OccupiedIPs,
+		mailTemplates: config.MailTemplates,
 	}
 }

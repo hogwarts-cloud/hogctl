@@ -6,32 +6,49 @@ import (
 	"github.com/spf13/viper"
 )
 
-type Config struct {
-	Cluster   models.Cluster
+type ClusterConfig struct {
+	Cluster models.Cluster
+}
+
+type InstancesConfig struct {
 	Instances []models.Instance
 }
 
-func Load(path string) Config {
-	viper.AddConfigPath(path)
-	viper.SetConfigType("yaml")
+func LoadCluster(path string) ClusterConfig {
+	viper.SetConfigFile(path)
 
-	for _, config := range []string{"cluster", "instances"} {
-		viper.SetConfigName(config)
-		if err := viper.MergeInConfig(); err != nil {
-			panic(err)
-		}
+	if err := viper.ReadInConfig(); err != nil {
+		panic(err)
 	}
 
-	cfg := Config{}
+	cluster := ClusterConfig{}
 
-	if err := viper.Unmarshal(&cfg, viper.DecodeHook(
+	if err := viper.Unmarshal(&cluster, viper.DecodeHook(
 		mapstructure.ComposeDecodeHookFunc(
-			mapstructure.StringToTimeHookFunc("02-01-2006"),
 			mapstructure.StringToIPHookFunc(),
 			mapstructure.StringToIPNetHookFunc(),
 		))); err != nil {
 		panic(err)
 	}
 
-	return cfg
+	return cluster
+}
+
+func LoadInstances(path string) InstancesConfig {
+	viper.SetConfigFile(path)
+
+	if err := viper.ReadInConfig(); err != nil {
+		panic(err)
+	}
+
+	instances := InstancesConfig{}
+
+	if err := viper.Unmarshal(&instances, viper.DecodeHook(
+		mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeHookFunc("02-01-2006"),
+		))); err != nil {
+		panic(err)
+	}
+
+	return instances
 }

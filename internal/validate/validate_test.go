@@ -1,4 +1,4 @@
-package validator
+package validate
 
 import (
 	"testing"
@@ -294,10 +294,10 @@ func Test_Validate(t *testing.T) {
 
 	domain := "vm.urgu.org"
 
-	validator := New(flavors, domain)
+	validator := NewCmd(flavors, domain)
 
 	for _, tc := range testCases {
-		err := validator.Validate(tc.instances)
+		err := validator.Run(tc.instances)
 		if tc.wantErr {
 			assert.ErrorIs(t, err, tc.err)
 		} else {

@@ -6,6 +6,7 @@ type Cluster struct {
 	Hosts   []Host
 	Flavors []Flavor
 	Storage Storage
+	Backup  Backup
 	Image   string
 	Domain  string
 	Network Network
@@ -35,6 +36,10 @@ type FlavorResources struct {
 
 type Storage struct {
 	Pool string
+}
+
+type Backup struct {
+	Dir string
 }
 
 type Network struct {

@@ -4,13 +4,17 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"os/user"
 	"text/template"
 
 	"github.com/hogwarts-cloud/hogctl/config"
-	"github.com/hogwarts-cloud/hogctl/internal/applier"
+	"github.com/hogwarts-cloud/hogctl/internal/apply"
+	"github.com/hogwarts-cloud/hogctl/internal/backup"
+	"github.com/hogwarts-cloud/hogctl/internal/executor"
 	"github.com/hogwarts-cloud/hogctl/internal/incus"
-	"github.com/hogwarts-cloud/hogctl/internal/mailer"
-	"github.com/hogwarts-cloud/hogctl/internal/validator"
+	"github.com/hogwarts-cloud/hogctl/internal/mail"
+	"github.com/hogwarts-cloud/hogctl/internal/validate"
+	incusServer "github.com/lxc/incus/client"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -19,7 +23,8 @@ var (
 	//go:embed templates
 	templatesFS embed.FS
 
-	configPath string
+	clusterConfigPath   string
+	instancesConfigPath string
 )
 
 var root = &cobra.Command{
@@ -27,29 +32,19 @@ var root = &cobra.Command{
 	Short: "Utility for Hogwarts Cloud",
 }
 
-var validate = &cobra.Command{
-	Use:   "validate",
-	Short: "Validate the configuration from directory",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cmd.SilenceUsage = true
-		cfg := config.Load(configPath)
-
-		validator := validator.New(cfg.Cluster.Flavors, cfg.Cluster.Domain)
-
-		if err := validator.Validate(cfg.Instances); err != nil {
-			return fmt.Errorf("failed to validate instances: %w", err)
-		}
-
-		return nil
-	},
-}
-
-var apply = &cobra.Command{
+var applyCmd = &cobra.Command{
 	Use:   "apply",
 	Short: "Apply the configuration from directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		cfg := config.Load(configPath)
+
+		clusterConfig := config.LoadCluster(clusterConfigPath)
+		instancesConfig := config.LoadInstances(instancesConfigPath)
+
+		server, err := incusServer.ConnectIncusUnix("", nil)
+		if err != nil {
+			return fmt.Errorf("failed to connect to Incus server: %w", err)
+		}
 
 		incusTemplates, err := template.ParseFS(templatesFS, "templates/incus/*.tmpl")
 		if err != nil {
@@ -61,42 +56,133 @@ var apply = &cobra.Command{
 			return fmt.Errorf("failed to parse mail templates: %w", err)
 		}
 
-		incus, err := incus.New(cfg.Cluster, incusTemplates)
-		if err != nil {
-			return fmt.Errorf("failed to create incus client: %w", err)
+		incusConfig := incus.Config{
+			Server:    server,
+			Cluster:   clusterConfig.Cluster,
+			Templates: incusTemplates,
 		}
 
-		mailer := mailer.New(cfg.Cluster.Mail.Server)
+		incus := incus.New(incusConfig)
 
-		applierCfg := applier.Config{
-			Domain:        cfg.Cluster.Domain,
-			CIDR:          cfg.Cluster.Network.CIDR,
-			OccupiedIPs:   cfg.Cluster.Network.OccupiedIPs,
+		currentUser, err := user.Current()
+		if err != nil {
+			return fmt.Errorf("failed to get current user: %w", err)
+		}
+
+		hostname, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("failed to get hostname: %w", err)
+		}
+
+		senderName := fmt.Sprintf("%s@%s", currentUser.Username, hostname)
+
+		mailSender := mail.NewSender(clusterConfig.Cluster.Mail.Server, senderName)
+
+		applyConfig := apply.Config{
+			Incus:         incus,
+			MailSender:    mailSender,
+			Domain:        clusterConfig.Cluster.Domain,
+			CIDR:          clusterConfig.Cluster.Network.CIDR,
+			OccupiedIPs:   clusterConfig.Cluster.Network.OccupiedIPs,
 			MailTemplates: mailTemplates,
 		}
 
-		applier := applier.New(incus, mailer, applierCfg)
+		applyCmd := apply.NewCmd(applyConfig)
 
-		launchedInstancesInfo, err := applier.Apply(cmd.Context(), cfg.Instances)
+		launchedInstancesInfo, err := applyCmd.Run(cmd.Context(), instancesConfig.Instances)
 		if err != nil {
 			return fmt.Errorf("failed to apply instances: %w", err)
 		}
 
-		message, err := yaml.Marshal(launchedInstancesInfo)
+		data, err := yaml.Marshal(launchedInstancesInfo)
 		if err != nil {
 			return fmt.Errorf("failed to marshal to yaml: %w", err)
 		}
 
-		fmt.Println(string(message))
+		fmt.Println(string(data))
+
+		return nil
+	},
+}
+
+var backupCmd = &cobra.Command{
+	Use:   "backup",
+	Short: "Backup instances located on the same host",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
+		clusterConfig := config.LoadCluster(clusterConfigPath)
+
+		server, err := incusServer.ConnectIncusUnix("", nil)
+		if err != nil {
+			return fmt.Errorf("failed to connect to Incus server: %w", err)
+		}
+
+		incusConfig := incus.Config{
+			Server:  server,
+			Cluster: clusterConfig.Cluster,
+		}
+
+		incus := incus.New(incusConfig)
+
+		executor := executor.New()
+
+		hostname, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("failed to get hostname: %w", err)
+		}
+
+		backupConfig := backup.Config{
+			Incus:     incus,
+			Executor:  executor,
+			Hostname:  hostname,
+			Directory: clusterConfig.Cluster.Backup.Dir,
+		}
+
+		backupCmd := backup.NewCmd(backupConfig)
+
+		if err := backupCmd.Run(cmd.Context()); err != nil {
+			return fmt.Errorf("failed to backup instances: %w", err)
+		}
+
+		return nil
+	},
+}
+
+var notifyCmd = &cobra.Command{
+	Use:   "notify",
+	Short: "Notify users that the expiration date is approaching",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// cmd.SilenceUsage = true
+		// cfg := config.Load(configPath)
+
+		return nil
+	},
+}
+
+var validateCmd = &cobra.Command{
+	Use:   "validate",
+	Short: "Validate the configuration from directory",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
+		clusterConfig := config.LoadCluster(clusterConfigPath)
+		instancesConfig := config.LoadInstances(instancesConfigPath)
+
+		validateCmd := validate.NewCmd(clusterConfig.Cluster.Flavors, clusterConfig.Cluster.Domain)
+
+		if err := validateCmd.Run(instancesConfig.Instances); err != nil {
+			return fmt.Errorf("failed to validate instances: %w", err)
+		}
 
 		return nil
 	},
 }
 
 func init() {
-	root.PersistentFlags().StringVar(&configPath, "config", "", "Path to config directory")
-	root.MarkPersistentFlagRequired("config")
-	root.AddCommand(validate, apply)
+	root.PersistentFlags().StringVar(&clusterConfigPath, "cluster-config", "/etc/hogctl/cluster.yaml", "Path to cluster config")
+	root.PersistentFlags().StringVar(&instancesConfigPath, "instances-config", "/etc/hogctl/instances.yaml", "Path to instances config")
+	root.AddCommand(applyCmd, backupCmd, notifyCmd, validateCmd)
 }
 
 func main() {

@@ -1,4 +1,4 @@
-package validator
+package validate
 
 import (
 	"errors"
@@ -28,12 +28,12 @@ var (
 	ErrFoundDuplicatedInstanceNames = errors.New("found duplicated instance names")
 )
 
-type Validator struct {
+type ValidateCmd struct {
 	flavors []models.Flavor
 	domain  string
 }
 
-func (v *Validator) Validate(instances []models.Instance) error {
+func (v *ValidateCmd) Run(instances []models.Instance) error {
 	if len(instances) == 0 {
 		return ErrEmptyInstancesList
 	}
@@ -54,7 +54,7 @@ func (v *Validator) Validate(instances []models.Instance) error {
 	return nil
 }
 
-func (v *Validator) validateInstance(instance models.Instance) error {
+func (v *ValidateCmd) validateInstance(instance models.Instance) error {
 	if len(instance.Name) == 0 {
 		return ErrEmptyInstanceName
 	}
@@ -101,8 +101,8 @@ func (v *Validator) validateInstance(instance models.Instance) error {
 	return nil
 }
 
-func New(flavors []models.Flavor, domain string) *Validator {
-	return &Validator{
+func NewCmd(flavors []models.Flavor, domain string) *ValidateCmd {
+	return &ValidateCmd{
 		flavors: flavors,
 		domain:  domain,
 	}

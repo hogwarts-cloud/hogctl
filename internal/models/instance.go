@@ -27,11 +27,6 @@ type User struct {
 	PublicKey string
 }
 
-type InstanceNetworkInfo struct {
-	IP            net.IP `yaml:"ip"`
-	ForwardedPort int    `yaml:"port"`
-}
-
 type LaunchConfig struct {
 	Instance
 	InstanceNetworkInfo
@@ -39,11 +34,44 @@ type LaunchConfig struct {
 
 type InstanceInfo struct {
 	Name                string `yaml:"name"`
-	Email               string `yaml:"email"`
+	Location            string `yaml:"-"`
+	InstanceUserInfo    `yaml:"user"`
 	InstanceNetworkInfo `yaml:"network"`
+}
+
+type InstanceUserInfo struct {
+	Name  string `yaml:"name"`
+	Email string `yaml:"email"`
+}
+
+type InstanceNetworkInfo struct {
+	IP            net.IP `yaml:"ip"`
+	ForwardedPort int    `yaml:"port"`
 }
 
 type ApplyResult struct {
 	Launched []InstanceInfo `yaml:"launched"`
 	Deleted  []InstanceInfo `yaml:"deleted"`
+}
+
+type InstanceState int
+
+const (
+	RunningState InstanceState = iota
+	StoppedState
+)
+
+func (s InstanceState) String() string {
+	switch s {
+	case RunningState:
+		return "start"
+	case StoppedState:
+		return "stop"
+	}
+	return ""
+}
+
+type RecoveryInfo struct {
+	Config  map[string]string            `yaml:"config"`
+	Devices map[string]map[string]string `yaml:"devices"`
 }
